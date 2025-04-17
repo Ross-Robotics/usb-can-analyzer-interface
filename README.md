@@ -2,6 +2,8 @@
 
 This project provides a modern C++20 wrapper around the USB-CAN Analyzer (V7.10) for Linux systems. It supports non-blocking reads/writes and is designed for integration into real-time applications.
 
+This work is heavily based on https://github.com/kobolt/usb-can
+
 ---
 
 ## 📦 Hardware Compatibility
