@@ -6,6 +6,7 @@
 #include <numeric>
 #include <iomanip>
 #include <cstring>
+#include <sstream>
 
 void print_usage() {
     std::cout << "Usage: can_usb_test [options]\n"

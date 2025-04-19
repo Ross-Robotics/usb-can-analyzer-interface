@@ -17,7 +17,10 @@ CanUsbDevice::CanUsbDevice(std::string device, int baudrate, Speed speed,
     : device_(std::move(device)), baudrate_(baudrate), can_speed_(speed),
       debug_(debug), logger_(std::move(logger)) {}
 
-CanUsbDevice::~CanUsbDevice() { close(); }
+CanUsbDevice::~CanUsbDevice() {
+    stop_reader();
+    close();
+}
 
 void CanUsbDevice::set_debug(bool enable) { debug_ = enable; }
 bool CanUsbDevice::is_debug() const { return debug_; }
@@ -59,6 +62,7 @@ bool CanUsbDevice::open() {
     }
 
     log("Opened USB CAN on " + device_);
+    start_reader();
     return true;
 }
 
@@ -66,6 +70,35 @@ void CanUsbDevice::close() {
     if (fd_ != -1) {
         ::close(fd_);
         fd_ = -1;
+    }
+}
+
+void CanUsbDevice::start_reader() {
+    running_ = true;
+    reader_thread_ = std::thread(&CanUsbDevice::reader_loop, this);
+}
+
+void CanUsbDevice::stop_reader() {
+    running_ = false;
+    if (reader_thread_.joinable()) {
+        reader_thread_.join();
+    }
+}
+
+void CanUsbDevice::reader_loop() {
+    uint8_t buf[64];
+
+    while (running_) {
+        pollfd pfd = {fd_, POLLIN, 0};
+        if (poll(&pfd, 1, 50) > 0) {
+            ssize_t n = ::read(fd_, buf, sizeof(buf));
+            if (n > 0) {
+                std::vector<uint8_t> frame(buf, buf + n);
+                if (is_complete(frame)) {
+                    recv_buffer_.push(frame);
+                }
+            }
+        }
     }
 }
 
@@ -80,9 +113,7 @@ bool CanUsbDevice::is_complete(const std::vector<uint8_t>& buf) {
     if (buf[0] != 0xAA) return true;
 
     uint8_t info = buf[1];
-
-    if (info == 0x55)
-        return buf.size() >= 20;
+    if (info == 0x55) return buf.size() >= 20;
 
     if ((info >> 4) == 0xC) {
         size_t expected_len = 1 + 1 + 2 + (info & 0x0F) + 1;
@@ -90,6 +121,26 @@ bool CanUsbDevice::is_complete(const std::vector<uint8_t>& buf) {
     }
 
     return true;
+}
+
+std::optional<std::vector<uint8_t>> CanUsbDevice::recv_frame() {
+    std::vector<uint8_t> frame;
+    if (recv_buffer_.pop(frame)) {
+        if (frame.size() == 20 && frame[0] == 0xAA && frame[1] == 0x55) {
+            int chk = checksum({frame.begin() + 2, frame.begin() + 19});
+            if (chk != frame.back()) {
+                log("Checksum mismatch");
+                return std::nullopt;
+            }
+        }
+        if (!frame.empty() && frame.back() != 0x55) {
+            log("Frame missing stop byte");
+            return std::nullopt;
+        }
+        log("← Received frame USBCAN: " + std::to_string(frame.size()) + " bytes");
+        return frame;
+    }
+    return std::nullopt;
 }
 
 bool CanUsbDevice::send_frame(std::span<const uint8_t> frame) {
@@ -101,46 +152,8 @@ bool CanUsbDevice::send_frame(std::span<const uint8_t> frame) {
         return false;
     }
 
-    std::ostringstream oss;
-    oss << "→ Sent frame USBCAN: " << frame.size() << " bytes";
-    log(oss.str());
+    log("→ Sent frame USBCAN: " + std::to_string(frame.size()) + " bytes");
     return true;
-}
-
-std::optional<std::vector<uint8_t>> CanUsbDevice::recv_frame() {
-    std::lock_guard lock(recv_mutex_);
-    if (fd_ < 0) return std::nullopt;
-
-    std::vector<uint8_t> frame;
-    frame.reserve(24);
-    uint8_t byte;
-
-    while (true) {
-        int n = ::read(fd_, &byte, 1);
-        if (n <= 0) return std::nullopt;
-
-        frame.push_back(byte);
-        if (is_complete(frame)) break;
-    }
-
-    if (frame.size() == 20 && frame[0] == 0xAA && frame[1] == 0x55) {
-        int chk = checksum({frame.begin() + 2, frame.begin() + 19});
-        if (chk != frame.back()) {
-            log("Checksum mismatch");
-            return std::nullopt;
-        }
-    }
-
-    if (!frame.empty() && frame.back() != 0x55) {
-        log("Frame missing stop byte");
-        return std::nullopt;
-    }
-
-    std::ostringstream oss;
-    oss << "← Received frame USBCAN: " << frame.size() << " bytes";
-    log(oss.str());
-
-    return frame;
 }
 
 bool CanUsbDevice::send_data(FrameType type, uint16_t id, std::span<const uint8_t> data) {

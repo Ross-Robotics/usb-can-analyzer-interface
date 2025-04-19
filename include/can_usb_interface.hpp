@@ -6,6 +6,10 @@
 #include <functional>
 #include <optional>
 #include <mutex>
+#include <thread>
+#include <atomic>
+
+#include "ring_buffer.hpp"
 
 namespace can_usb {
 
@@ -53,10 +57,18 @@ private:
     std::function<void(const std::string&)> logger_;
 
     std::mutex send_mutex_;
-    std::mutex recv_mutex_;
+
+    std::atomic<bool> running_{false};
+    std::thread reader_thread_;
+
+    static constexpr size_t BufferCapacity = 256;
+    RingBuffer<std::vector<uint8_t>, BufferCapacity> recv_buffer_;
 
     void log(const std::string& msg) const;
     bool send_settings();
+    void start_reader();
+    void stop_reader();
+    void reader_loop();
 };
 
 } // namespace can_usb
